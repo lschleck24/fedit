@@ -4,6 +4,52 @@
 #include "getopt.h" 
 #include <string.h>
 #include <stdbool.h>
+
+void rotate_right(FILE *file, int rotation_bytes) {
+    // Determine the size of the file
+    fseek(file, 0, SEEK_END);
+    long file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+
+    if (file_size == 0) return; // If the file is empty, do nothing
+
+    // Normalize the rotation bytes
+    //rotation_bytes = rotation_bytes % file_size;
+    rotation_bytes = rotation_bytes % file_size;
+
+    // Create a buffer to hold the file's contents
+    unsigned char *buffer = malloc(file_size);
+    if (!buffer) {
+        perror("Failed to allocate memory");
+        exit(1);
+    }
+
+    // Read the entire file into the buffer
+    fread(buffer, 1, file_size, file);
+
+    // Create a new buffer for the rotated contents
+    unsigned char *rotated = malloc(file_size);
+    if (!rotated) {
+        perror("Failed to allocate memory");
+        free(buffer);
+        exit(1);
+    }
+
+    // Perform the rotation
+    for (long i = 0; i < file_size; i++) {
+        long new_pos = (i + file_size - rotation_bytes) % file_size; // Calculate new position
+        rotated[i] = buffer[new_pos]; // Assign the byte to the new position
+    }
+
+    // Write the rotated contents back to the file
+    fseek(file, 0, SEEK_SET); // Go back to the start of the file
+    fwrite(rotated, 1, file_size, file); // Write the rotated bytes
+
+    // Clean up
+    free(buffer);
+    free(rotated);
+}
+
 void rotate_left(FILE *file, int rotation_bytes) {
     // Determine the size of the file
     fseek(file, 0, SEEK_END);
@@ -100,11 +146,11 @@ void skip_and_keep_file(FILE *file, int skip, int keep) {
     // Move to the end of the file to find the current size
     fseek(file, 0, SEEK_END);
     long current_size = ftell(file); // Get the current size of the file
+    printf("%ld\n",current_size);
 
-    // If the skip exceeds or matches the file size, we will truncate it
+    // If the skip exceeds or matches the file size, truncate the file
     if (skip >= current_size) {
-        // Truncate the file
-        freopen(NULL, "w", file); // This truncates the file
+        freopen(NULL, "w", file); // Truncate the file
         return; // The file will be empty
     }
 
@@ -125,25 +171,59 @@ void skip_and_keep_file(FILE *file, int skip, int keep) {
 
     // Move to the start position to read the bytes to keep
     fseek(file, start_position, SEEK_SET);
-    //fread(buffer, 1, keep, file);
 
-    unsigned char byte;
-    int byte_count = 0;
-    int buffer_index = 0;
-    while (fread(&byte, sizeof(unsigned char), 1, file) == 1 && skip + byte_count< current_size) {
-        // Write to buffer only if the byte count is a multiple of skip
-        if (skip + keep < current_size) {
-            if (buffer_index < keep) {
-                printf("%d: %d\n",buffer_index,byte_count);
-                buffer[buffer_index++] = byte; // Store the byte in the buffer
-            }
-        }
-        byte_count++;
-    }
-
+    // Read the bytes and store them in the buffer
+    size_t bytes_read = fread(buffer, sizeof(char), keep, file);
+    
     // Truncate the file and write back the kept data
     freopen(NULL, "w", file); // Truncate the file
-    fwrite(buffer, 1, keep, file); // Write the kept data back
+    fwrite(buffer, sizeof(char), bytes_read, file); // Write the kept data back
+
+    // Clean up
+    free(buffer);
+}
+
+void skip_and_keep_file_r(FILE *file, int skip, int keep) {
+    // Move to the end of the file to find the current size
+    fseek(file, 0, SEEK_END);
+    long current_size = ftell(file); // Get the current size of the file
+
+    // Reset file pointer to the beginning
+    fseek(file, 0, SEEK_SET);
+
+    // Create a buffer to accumulate the data to keep
+    char *buffer = malloc(current_size + 1); // Allocate enough memory for the file
+    if (!buffer) {
+        perror("Memory allocation failed");
+        exit(1);
+    }
+    size_t buffer_index = 0;
+
+    // Repeat the skip and keep operation until the end of the file is reached
+    while (ftell(file) < current_size) {
+        // Skip the specified number of bytes
+        if (fseek(file, skip, SEEK_CUR) != 0) {
+            break; // If skipping goes beyond EOF, stop
+        }
+
+        // Read the specified number of bytes to keep
+        char temp_buffer[keep];
+        size_t bytes_read = fread(temp_buffer, 1, keep, file);
+
+        // Copy the kept bytes to the main buffer
+        for (size_t i = 0; i < bytes_read; i++) {
+            buffer[buffer_index++] = temp_buffer[i];
+        }
+
+        // If we read fewer bytes than we were supposed to keep, we must be at the end
+        if (bytes_read < (size_t)keep) {
+            break; // We're at the end of the file
+        }
+    }
+
+    // Truncate the file and write back the accumulated kept data
+    freopen(NULL, "w", file); // Truncate the file
+    fwrite(buffer, 1, buffer_index, file); // Write the kept data back
 
     // Clean up
     free(buffer);
@@ -167,10 +247,11 @@ main(int argc, char *argv[])
     int contract_size = 0;
     int skip = 0;
     int keep = 0;
+    int repeat = 0;
     //int rotate_amount;
     FILE *file;
 
-    const char *short_opts = "hl:x:c:v:k:s:";
+    const char *short_opts = "hl:x:c:v:k:s:r:m";
     struct option long_opts[] = {
         {"help", no_argument, NULL, 'h'},
         {"rotate-left", required_argument, NULL, 'l'},
@@ -179,6 +260,8 @@ main(int argc, char *argv[])
         {"value", required_argument, NULL, 'v'},
         {"keep", required_argument, NULL, 'k'},
         {"skip", required_argument, NULL, 's'},
+        {"rotate-right",required_argument,NULL,'r'},
+        {"repeat",no_argument,NULL,'m'},
         {NULL, 0, NULL, 0}
     };
 
@@ -261,6 +344,24 @@ main(int argc, char *argv[])
                 }
                 break;
             }
+            case 'r':{
+                int rotation_size = atoi(optarg);
+                printf("%d\n",rotation_size);
+                if(rotation_size<0){
+                    fprintf(stderr,"RAAA\n");
+                    exit(1);
+                }
+                rotate_right(file,rotation_size);
+                break;
+            }
+            case 'm': {
+                if (keep == 0) { // Ensure keep is specified
+                fprintf(stderr, "Error: --repeat requires --keep to be specified\n");
+                exit(1);
+            }
+                repeat = 1; // Set repeat flag
+                break;
+            }
             case '?':{
                 //fprintf(stderr,"Unknown Operation");
                 exit(1);
@@ -277,8 +378,29 @@ main(int argc, char *argv[])
         expand_file(file,expand_count,value);
     }
     
-    if(keep>0){
+    if(keep>0 && repeat==0){
         skip_and_keep_file(file,skip,keep);
+    }
+/*
+    if(repeat==1){
+        fseek(file, 0, SEEK_END);
+        long current_size = ftell(file);
+
+        bool end = false;
+
+        while(end==false){
+            skip_and_keep_file(file,skip,keep);
+            skip+=skip;
+            if(skip>current_size){
+                end=true;
+            }
+        }
+
+
+    }*/
+
+    if(repeat==1){
+        skip_and_keep_file_r(file,skip,keep);
     }
 
     return 0;
